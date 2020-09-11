@@ -18,7 +18,7 @@ files <- unlist(strsplit(files, '\n'))
 # Download each file and unzip
 for (i in files) {
   download.file(paste(url, i, sep = ""), paste0(here("data"), "/", i))
-  unzip(paste0(here("data"), "/", i), exdir = here("data", tools::file_path_sans_ext(i)))
+  unzip(paste0(here("data"), "/", i), exdir = here("data"))
 }
 ```
 
