@@ -222,6 +222,11 @@ area_ts_wide <- area_ts %>%
   mutate(total = CA1 + CA2 + CA3) %>% 
   relocate(complete_survey, .after = last_col()) %>% 
   relocate(source, .after = last_col())
+
+# Add total to the long version
+area_ts <- area_ts_wide %>% 
+  pivot_longer(cols = c("CA1", "CA2", "CA3", "total"), names_to = "region", values_to = "total_area_m2") %>% 
+  select(year, region, total_area_m2, complete_survey, source)
 ```
 
 Save the tables:
@@ -260,9 +265,77 @@ ggplot(data = area_ts, aes(x = year, y = total_area_m2/1e6, fill = complete_surv
 ggsave(here("output", "fig_ca_kelp_time_series.png"), height = 6, width = 9, dpi = 300)
 ```
 
+## Calculate area changes
+
+What is the difference between the area of kelp coverage in 1911 and that of the most recent year(s) of data?
+```{r calc-area-changes}
+# Delta
+(sum(kelp_historical_df$Shape_Area) -
+sum(kelp_current_df$area[kelp_current_df$year == 2016])
+) / 1e6 # sq. km
+
+# %
+(sum(kelp_historical_df$Shape_Area) -
+sum(kelp_current_df$area[kelp_current_df$year == 2016])
+) / sum(kelp_historical_df$Shape_Area) * 100
+
+```
+
+## Plot changes between 1911 and 2016
+
+A few different plot options:
+```{r}
+region_pal <- "wesanderson::Darjeeling1"
+labs <- c("CA1" = "Northern", "CA2" = "Central", "CA3" = "Southern")
+
+# Dodged bar plot of area per region, all years
+area_ts %>% 
+  filter(complete_survey == TRUE) %>% 
+  ggplot(aes(x = region_cod, y = total_area_m2/1e6, fill = as.factor(year))) +
+  geom_col(position = "dodge") +
+  labs(y = "Kelp canopy area (sq. km)",
+       fill = "Year",
+       x = NULL) +
+  #scale_fill_manual() +
+  ggpubr::theme_pubr() +
+  theme(legend.position = "right")
+
+# Dodged bar plot of area in 2016 vs. 1911 per region
+area_ts %>% 
+  filter(year == 1911 | year == 2016) %>% 
+  ggplot(aes(x = region_cod, y = total_area_m2/1e6, fill = as.factor(year))) +
+  geom_col(position = "dodge") +
+  labs(y = "Kelp canopy area (sq. km)",
+       fill = "Year",
+       x = NULL) +
+  scale_fill_manual(values = c("1911" = "black", "2016" = "gray40")) +
+  ggpubr::theme_pubr() +
+  theme(legend.position = "right")
+
+# % change from 1911 levels per year
+area_ts %>% 
+  filter(complete_survey == TRUE) %>% 
+  group_by(region_cod) %>% 
+  mutate(prop_loss = (total_area_m2 - total_area_m2[year == 1911])/total_area_m2[year == 1911]) %>% 
+  ungroup() %>% 
+  filter(year != 1911) %>% 
+  ggplot(aes(x = year, y = prop_loss, color = region_cod)) +
+  geom_point() +
+  geom_line() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray80") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_color_paletteer_d(region_pal, labels = labs) +
+  labs(x = NULL,
+       y = "Percentage kelp canopy area lost",
+       color = NULL) +
+  ggpubr::theme_pubr() +
+  theme(legend.position = "right")
+```
+
+
 ## Plot maps of historical vs. current coverage
 
-First make a map of overall 
+First make a map of the overall coastline.
 ```{r plot-total-maps}
 # First do the same filtering of subsurface kelp, but on the polygon. 
 # Since I think we'll be primarily showing the 1911 data vs. the 2016,
@@ -275,9 +348,6 @@ kelp_2016 <- kelp_current_regions %>%
 
 # Full coastline
 
-pal <- "wesanderson::Darjeeling1"
-labs <- c("CA1" = "Northern", "CA2" = "Central", "CA3" = "Southern")
-
 (a <- ggplot() +
     geom_sf(data = ca_boundary, size = 0.1, fill = "ivory2") +
     geom_sf(data = kelp_historical_regions,  aes(fill = region_cod, color = region_cod), size = 0.7) +
@@ -286,8 +356,8 @@ labs <- c("CA1" = "Northern", "CA2" = "Central", "CA3" = "Southern")
     labs(subtitle = "1911",
          fill = NULL, 
          color = NULL) +
-    paletteer::scale_fill_paletteer_d(pal, labels = labs) +
-    paletteer::scale_color_paletteer_d(pal, labels = labs) +
+    scale_fill_paletteer_d(region_pal,  labels = labs) +
+    scale_color_paletteer_d(region_pal,  labels = labs) +
     theme_void()
 )
 
@@ -297,8 +367,8 @@ b <- ggplot() +
     labs(subtitle = "2016",
          fill = NULL, 
          color = NULL) +
-    paletteer::scale_fill_paletteer_d(pal, labels = labs) +
-    paletteer::scale_color_paletteer_d(pal, labels = labs) +
+    scale_fill_paletteer_d(region_pal,  labels = labs) +
+    scale_color_paletteer_d(region_pal,  labels = labs) +
     theme_void()
 
 ggpubr::ggarrange(a, b, 
@@ -309,6 +379,10 @@ ggpubr::ggarrange(a, b,
                   legend = "right")
 
 ggsave(here("output", "fig_kelp_map_1911_vs_2016.png"), height = 6, width = 8, dpi = 300)
+```
+
+Next, make two "highlight" maps of sites in Northern and Southern CA. 
+```{r}
 
 # Northern CA
 
@@ -349,23 +423,6 @@ kelp_2016 %>%
   st_crop(c("xmin" = -120.260510, "ymin" = 33.875765, "xmax" = -119.944782, "ymax" = 34.053141))
 ```
 
-## Calculate area changes
-
-## Overall
-
-What is the difference between the area of kelp coverage in 1911 and that of the most recent year(s) of data?
-```{r}
-# Delta
-(sum(kelp_historical_df$Shape_Area) -
-sum(kelp_current_df$area[kelp_current_df$year == 2016])
-) / 1e6 # sq. km
-
-# %
-(sum(kelp_historical_df$Shape_Area) -
-sum(kelp_current_df$area[kelp_current_df$year == 2016])
-) / sum(kelp_historical_df$Shape_Area) * 100
-
-```
 
 # Other investigations
 
