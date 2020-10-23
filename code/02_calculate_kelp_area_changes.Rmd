@@ -101,7 +101,7 @@ dev.off()
 Make slightly more detailed map of raw 1911 data. Note that the southernmost part of the shapefile extends outside California, so I will trim that out later.
 ```{r raw-map-hist}
 pal <- "RColorBrewer::Greens"
-density_levels <- c("Very heavy", "Heavy", "Medium heavy", "Medium", "Reported", "Thin", "Very thin")
+density_levels <- c("Very heavy", "Heavy", "Medium heavy", "Reported", "Medium", "Thin", "Very thin")
 
 (plot_1911 <- ggplot() +
   geom_sf(data = ca_boundary, size = 0.1, fill = "ivory2") +
@@ -178,9 +178,9 @@ walk(kelp_current_regions,
 
 # Comparisons of kelp area
 
-## Time series of total kelp area
+## Calculate total kelp area
 
-Additionally, I need to do some wrangling of the column names in the CDFW data since the `area`, `length`, `class`, and `kelp_bed` (polygon id) variables have different names depending on the file you are looking at.
+I need to do some wrangling of the column names in the CDFW data since the `area`, `length`, `class`, and `kelp_bed` (polygon id) variables have different names depending on the file you are looking at.
 ```{r drop-geometry}
 # Drop geometry and convert to data frame. Coalesce columns where needed
 kelp_current_df <- map(kelp_current_regions, st_drop_geometry) %>% 
@@ -196,6 +196,41 @@ kelp_current_df %>% map_dbl(~sum(is.na(.))) # Check for NAs
 
 kelp_historical_df <- st_drop_geometry(kelp_historical_regions)
 ```
+
+Because the methods for each data source differ (multispectral imagery vs. vessel-based visual surveys), the CDFW and Cameron (1915) data are liked biased in different directions. The CDFW data is comprised of many small, high-resolution polygons, whereas the historical data is compromised of polygons with very large areas and no holes. Therefore, the historical data likely overestimates the actual kelp canopy area since it is likely that density is heterogeneous within each polygon. We can adjust the area of the historical polygons based on Table XXI from Cameron (2015) which contains kelp weights per square yard for each density class. The values from the table are below. Also of note is that there is another class recorded in Cameron (2015) without any density information, named "Reported," but this class makes up only 5/245 (2%) of kelp observations in the dataset. 
+
+| Density class  | *Nereocystis* | *Macrocystis* | *Alaria fistulosa* |
+|----------------|-------------|-------------|------------------|
+| Very thin      | 55          | 22          | 2.8              |
+| Thin           | 56-111      | 23-34       | 2.9-5.2          |
+| Medium         | 112-167     | 35-44       | 5.5-8.2          |
+| Medium heavy   | 168-224     | 45-54       | 8.3-10.9         |
+| Heavy          | 225-280     | 55-64       | 11-13.6          |
+| Very Heavy     | 281         | 65          | 13.7             |
+
+
+For the purposes of this work, we will only consider *Nereocystis* and *Macrocystis*, since *A. fistulosa* is not distributed in California (is this right). For classes with ranges, we will use the average.
+```{r adjust-historical-area}
+kelp_weights <- read_csv(here("raw", "cameron_1915_kelp_weights.csv"))
+
+kelp_weights <- kelp_weights %>% 
+  # Rescale the Nero and Macro weights by dividing by the maximum
+  mutate(nereo_rescaled = Nereo/max(Nereo),
+         macro_rescaled = Macro/max(Macro)) %>% 
+  # For the "reported" class, let's assume it is the average of the weights for each species
+  add_row(Class = "Reported",
+          nereo_rescaled = mean(.$nereo_rescaled),
+          macro_rescaled = mean(.$macro_rescaled)) %>% 
+  # We assume the kelp is a mix of these two spp, so take the average rescaled value
+  rowwise() %>% 
+  mutate(mean_kelp_weight = mean(c(nereo_rescaled, macro_rescaled))) %>% 
+  rename(nereo_lbs_per_yd2 = Nereo,
+         macro_lbs_per_yd2 = Macro) %>% 
+  write_csv(here("processed", "kelp_weights_for_scaling.csv"))
+
+
+```
+
 
 Next I'll filter the CDFW survey data to only the kelp marked as "canopy" (vs. "subsurface"), and calculate total canopy area per year per region for all surveys. Any surveys without a classification are assumed to be of the kelp canopy. Additionally, I'll denote which CDFW survey years were complete surveys, based on the bar graph on their website (linked above).
 ```{r calc-ts}
@@ -250,7 +285,7 @@ area_ts_wide %>%
 Plot a quick time series.
 ```{r plot-ts}
 # Plot
-ggplot(data = area_ts, aes(x = year, y = total_area_m2/1e6, fill = complete_survey)) +
+ggplot(data = filter(area_ts, region == "total"), aes(x = year, y = total_area_m2/1e6, fill = complete_survey)) +
   geom_col() +
   scale_x_continuous(breaks = seq(1910, 2020, by = 10)) +
   scale_y_continuous(expand = c(0,0)) +
@@ -286,46 +321,49 @@ sum(kelp_current_df$area[kelp_current_df$year == 2016])
 A few different plot options:
 ```{r}
 region_pal <- "wesanderson::Darjeeling1"
-labs <- c("CA1" = "Northern", "CA2" = "Central", "CA3" = "Southern")
+year_pal <- calecopal::cal_palette("sbchannel", n = 10, type = "continuous")
+labs <- c("CA1" = "Northern", "CA2" = "Central", "CA3" = "Southern", "total" = "Total")
 
 # Dodged bar plot of area per region, all years
 area_ts %>% 
   filter(complete_survey == TRUE) %>% 
-  ggplot(aes(x = region_cod, y = total_area_m2/1e6, fill = as.factor(year))) +
+  ggplot(aes(x = region, y = total_area_m2/1e6, fill = as.factor(year))) +
   geom_col(position = "dodge") +
   labs(y = "Kelp canopy area (sq. km)",
        fill = "Year",
        x = NULL) +
-  #scale_fill_manual() +
+  scale_fill_manual(values = year_pal) +
+  scale_x_discrete(labels = labs) +
   ggpubr::theme_pubr() +
   theme(legend.position = "right")
 
 # Dodged bar plot of area in 2016 vs. 1911 per region
 area_ts %>% 
   filter(year == 1911 | year == 2016) %>% 
-  ggplot(aes(x = region_cod, y = total_area_m2/1e6, fill = as.factor(year))) +
+  ggplot(aes(x = region, y = total_area_m2/1e6, fill = as.factor(year))) +
   geom_col(position = "dodge") +
   labs(y = "Kelp canopy area (sq. km)",
        fill = "Year",
        x = NULL) +
   scale_fill_manual(values = c("1911" = "black", "2016" = "gray40")) +
+  scale_x_discrete(labels = labs) +
   ggpubr::theme_pubr() +
   theme(legend.position = "right")
 
 # % change from 1911 levels per year
 area_ts %>% 
   filter(complete_survey == TRUE) %>% 
-  group_by(region_cod) %>% 
+  group_by(region) %>% 
   mutate(prop_loss = (total_area_m2 - total_area_m2[year == 1911])/total_area_m2[year == 1911]) %>% 
   ungroup() %>% 
   filter(year != 1911) %>% 
-  ggplot(aes(x = year, y = prop_loss, color = region_cod)) +
+  ggplot(aes(x = year, y = prop_loss, color = region)) +
   geom_point() +
   geom_line() +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray80") +
   scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
-  scale_color_paletteer_d(region_pal, labels = labs) +
-  labs(x = NULL,
+  scale_color_manual(values = c(paletteer_d(region_pal)[1:3], "black"), labels = labs) +
+  labs(x = "Year",
        y = "Percentage kelp canopy area lost",
        color = NULL) +
   ggpubr::theme_pubr() +

@@ -188,13 +188,12 @@ Save, so the segmentation code does not have to be run again.
 Comparisons of kelp area
 ========================
 
-Time series of total kelp area
-------------------------------
+Calculate total kelp area
+-------------------------
 
-Additionally, I need to do some wrangling of the column names in the
-CDFW data since the `area`, `length`, `class`, and `kelp_bed` (polygon
-id) variables have different names depending on the file you are looking
-at.
+I need to do some wrangling of the column names in the CDFW data since
+the `area`, `length`, `class`, and `kelp_bed` (polygon id) variables
+have different names depending on the file you are looking at.
 
     # Drop geometry and convert to data frame. Coalesce columns where needed
     kelp_current_df <- map(kelp_current_regions, st_drop_geometry) %>% 
@@ -209,6 +208,73 @@ at.
     kelp_current_df %>% map_dbl(~sum(is.na(.))) # Check for NAs
 
     kelp_historical_df <- st_drop_geometry(kelp_historical_regions)
+
+Because the methods for each data source differ (multispectral imagery
+vs. vessel-based visual surveys), the CDFW and Cameron (1915) data are
+liked biased in different directions. The CDFW data is comprised of many
+small, high-resolution polygons, whereas the historical data is
+compromised of polygons with very large areas and no holes. Therefore,
+the historical data likely overestimates the actual kelp canopy area
+since it is likely that density is heterogeneous within each polygon. We
+can adjust the area of the historical polygons based on Table XXI from
+Cameron (2015) which contains kelp weights per area for each density
+class. The values from the table are:
+
+<table>
+<thead>
+<tr class="header">
+<th>Density class</th>
+<th><em>Nereocystis</em></th>
+<th><em>Macrocystis</em></th>
+<th><em>Alaria fistulosa</em></th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Very thin</td>
+<td>55</td>
+<td>22</td>
+<td>2.8</td>
+</tr>
+<tr class="even">
+<td>Thin</td>
+<td>56-111</td>
+<td>23-34</td>
+<td>2.9-5.2</td>
+</tr>
+<tr class="odd">
+<td>Medium</td>
+<td>112-167</td>
+<td>35-44</td>
+<td>5.5-8.2</td>
+</tr>
+<tr class="even">
+<td>Medium heavy</td>
+<td>168-224</td>
+<td>45-54</td>
+<td>8.3-10.9</td>
+</tr>
+<tr class="odd">
+<td>Heavy</td>
+<td>225-280</td>
+<td>55-64</td>
+<td>11-13.6</td>
+</tr>
+<tr class="even">
+<td>Very Heavy</td>
+<td>281</td>
+<td>65</td>
+<td>13.7</td>
+</tr>
+</tbody>
+</table>
+
+For the purposes of this work, we will only consider *Nereocystis* and
+*Macrocystis*, since *A. fistulosa* is not distributed in California (is
+this right). Also of note is that there is another class recorded in
+Cameron (2015) without any density information, named “Reported.”
+
+    # The data
 
 Next I’ll filter the CDFW survey data to only the kelp marked as
 “canopy” (vs. “subsurface”), and calculate total canopy area per year
@@ -241,6 +307,11 @@ website (linked above).
       relocate(complete_survey, .after = last_col()) %>% 
       relocate(source, .after = last_col())
 
+    # Add total to the long version
+    area_ts <- area_ts_wide %>% 
+      pivot_longer(cols = c("CA1", "CA2", "CA3", "total"), names_to = "region", values_to = "total_area_m2") %>% 
+      select(year, region, total_area_m2, complete_survey, source)
+
 Save the tables:
 
     write_csv(area_ts, here("output", "annual_kelp_area.csv"))
@@ -261,7 +332,7 @@ Save the tables:
 Plot a quick time series.
 
     # Plot
-    ggplot(data = area_ts, aes(x = year, y = total_area_m2/1e6, fill = complete_survey)) +
+    ggplot(data = filter(area_ts, region == "total"), aes(x = year, y = total_area_m2/1e6, fill = complete_survey)) +
       geom_col() +
       scale_x_continuous(breaks = seq(1910, 2020, by = 10)) +
       scale_y_continuous(expand = c(0,0)) +
@@ -275,10 +346,80 @@ Plot a quick time series.
 
     ggsave(here("output", "fig_ca_kelp_time_series.png"), height = 6, width = 9, dpi = 300)
 
+Calculate area changes
+----------------------
+
+What is the difference between the area of kelp coverage in 1911 and
+that of the most recent year(s) of data?
+
+    # Delta
+    (sum(kelp_historical_df$Shape_Area) -
+    sum(kelp_current_df$area[kelp_current_df$year == 2016])
+    ) / 1e6 # sq. km
+
+    # %
+    (sum(kelp_historical_df$Shape_Area) -
+    sum(kelp_current_df$area[kelp_current_df$year == 2016])
+    ) / sum(kelp_historical_df$Shape_Area) * 100
+
+Plot changes between 1911 and 2016
+----------------------------------
+
+A few different plot options:
+
+    region_pal <- "wesanderson::Darjeeling1"
+    year_pal <- calecopal::cal_palette("sbchannel", n = 10, type = "continuous")
+    labs <- c("CA1" = "Northern", "CA2" = "Central", "CA3" = "Southern", "total" = "Total")
+
+    # Dodged bar plot of area per region, all years
+    area_ts %>% 
+      filter(complete_survey == TRUE) %>% 
+      ggplot(aes(x = region, y = total_area_m2/1e6, fill = as.factor(year))) +
+      geom_col(position = "dodge") +
+      labs(y = "Kelp canopy area (sq. km)",
+           fill = "Year",
+           x = NULL) +
+      scale_fill_manual(values = year_pal) +
+      scale_x_discrete(labels = labs) +
+      ggpubr::theme_pubr() +
+      theme(legend.position = "right")
+
+    # Dodged bar plot of area in 2016 vs. 1911 per region
+    area_ts %>% 
+      filter(year == 1911 | year == 2016) %>% 
+      ggplot(aes(x = region, y = total_area_m2/1e6, fill = as.factor(year))) +
+      geom_col(position = "dodge") +
+      labs(y = "Kelp canopy area (sq. km)",
+           fill = "Year",
+           x = NULL) +
+      scale_fill_manual(values = c("1911" = "black", "2016" = "gray40")) +
+      scale_x_discrete(labels = labs) +
+      ggpubr::theme_pubr() +
+      theme(legend.position = "right")
+
+    # % change from 1911 levels per year
+    area_ts %>% 
+      filter(complete_survey == TRUE) %>% 
+      group_by(region) %>% 
+      mutate(prop_loss = (total_area_m2 - total_area_m2[year == 1911])/total_area_m2[year == 1911]) %>% 
+      ungroup() %>% 
+      filter(year != 1911) %>% 
+      ggplot(aes(x = year, y = prop_loss, color = region)) +
+      geom_point() +
+      geom_line() +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "gray80") +
+      scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+      scale_color_manual(values = c(paletteer_d(region_pal)[1:3], "black"), labels = labs) +
+      labs(x = "Year",
+           y = "Percentage kelp canopy area lost",
+           color = NULL) +
+      ggpubr::theme_pubr() +
+      theme(legend.position = "right")
+
 Plot maps of historical vs. current coverage
 --------------------------------------------
 
-First make a map of overall
+First make a map of the overall coastline.
 
     # First do the same filtering of subsurface kelp, but on the polygon. 
     # Since I think we'll be primarily showing the 1911 data vs. the 2016,
@@ -291,9 +432,6 @@ First make a map of overall
 
     # Full coastline
 
-    pal <- "wesanderson::Darjeeling1"
-    labs <- c("CA1" = "Northern", "CA2" = "Central", "CA3" = "Southern")
-
     (a <- ggplot() +
         geom_sf(data = ca_boundary, size = 0.1, fill = "ivory2") +
         geom_sf(data = kelp_historical_regions,  aes(fill = region_cod, color = region_cod), size = 0.7) +
@@ -302,8 +440,8 @@ First make a map of overall
         labs(subtitle = "1911",
              fill = NULL, 
              color = NULL) +
-        paletteer::scale_fill_paletteer_d(pal, labels = labs) +
-        paletteer::scale_color_paletteer_d(pal, labels = labs) +
+        scale_fill_paletteer_d(region_pal,  labels = labs) +
+        scale_color_paletteer_d(region_pal,  labels = labs) +
         theme_void()
     )
 
@@ -313,8 +451,8 @@ First make a map of overall
         labs(subtitle = "2016",
              fill = NULL, 
              color = NULL) +
-        paletteer::scale_fill_paletteer_d(pal, labels = labs) +
-        paletteer::scale_color_paletteer_d(pal, labels = labs) +
+        scale_fill_paletteer_d(region_pal,  labels = labs) +
+        scale_color_paletteer_d(region_pal,  labels = labs) +
         theme_void()
 
     ggpubr::ggarrange(a, b, 
@@ -325,6 +463,8 @@ First make a map of overall
                       legend = "right")
 
     ggsave(here("output", "fig_kelp_map_1911_vs_2016.png"), height = 6, width = 8, dpi = 300)
+
+Next, make two “highlight” maps of sites in Northern and Southern CA.
 
     # Northern CA
 
@@ -363,25 +503,6 @@ First make a map of overall
       st_transform(st_crs(kelp_historical))
     kelp_2016 %>% 
       st_crop(c("xmin" = -120.260510, "ymin" = 33.875765, "xmax" = -119.944782, "ymax" = 34.053141))
-
-Calculate area changes
-----------------------
-
-Overall
--------
-
-What is the difference between the area of kelp coverage in 1911 and
-that of the most recent year(s) of data?
-
-    # Delta
-    (sum(kelp_historical_df$Shape_Area) -
-    sum(kelp_current_df$area[kelp_current_df$year == 2016])
-    ) / 1e6 # sq. km
-
-    # %
-    (sum(kelp_historical_df$Shape_Area) -
-    sum(kelp_current_df$area[kelp_current_df$year == 2016])
-    ) / sum(kelp_historical_df$Shape_Area) * 100
 
 Other investigations
 ====================
