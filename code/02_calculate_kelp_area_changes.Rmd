@@ -212,13 +212,16 @@ area_ts <- kelp_current_df %>%
       ungroup() %>% 
       mutate(year = 1911)
   ) %>% 
-  mutate(complete_survey = if_else(year %in% c(1911, 1989, 1999, 2002, 2003, 2004, 2005, 2008, 2015, 2016), TRUE, FALSE)) %>% 
+  mutate(complete_survey = if_else(year %in% c(1911, 1989, 1999, 2002, 2003, 2004, 2005, 2008, 2015, 2016), TRUE, FALSE),
+         source = if_else(year == 1911, "Cameron 1915", "CDFW 2020")) %>% 
   arrange(year, region_cod)
 
 # Make a wide version for the manuscript that includes the total
 area_ts_wide <- area_ts %>% 
   pivot_wider(names_from = "region_cod", values_from = "total_area_m2") %>% 
-  mutate(total = CA1 + CA2 + CA3)
+  mutate(total = CA1 + CA2 + CA3) %>% 
+  relocate(complete_survey, .after = last_col()) %>% 
+  relocate(source, .after = last_col())
 ```
 
 Save the tables:
@@ -259,6 +262,7 @@ ggsave(here("output", "fig_ca_kelp_time_series.png"), height = 6, width = 9, dpi
 
 ## Plot maps of historical vs. current coverage
 
+First make a map of overall 
 ```{r plot-total-maps}
 # First do the same filtering of subsurface kelp, but on the polygon. 
 # Since I think we'll be primarily showing the 1911 data vs. the 2016,
