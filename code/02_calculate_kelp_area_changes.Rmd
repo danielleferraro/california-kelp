@@ -102,6 +102,7 @@ Make slightly more detailed map of raw 1911 data. Note that the southernmost par
 ```{r raw-map-hist}
 pal <- "RColorBrewer::Greens"
 density_levels <- c("Very heavy", "Heavy", "Medium heavy", "Reported", "Medium", "Thin", "Very thin")
+# Assuming the position of the "Reported" class is in the center of the density levels 
 
 (plot_1911 <- ggplot() +
   geom_sf(data = ca_boundary, size = 0.1, fill = "ivory2") +
@@ -197,7 +198,7 @@ kelp_current_df %>% map_dbl(~sum(is.na(.))) # Check for NAs
 kelp_historical_df <- st_drop_geometry(kelp_historical_regions)
 ```
 
-Because the methods for each data source differ (multispectral imagery vs. vessel-based visual surveys), the CDFW and Cameron (1915) data are liked biased in different directions. The CDFW data is comprised of many small, high-resolution polygons, whereas the historical data is compromised of polygons with very large areas and no holes. Therefore, the historical data likely overestimates the actual kelp canopy area since it is likely that density is heterogeneous within each polygon. We can adjust the area of the historical polygons based on Table XXI from Cameron (2015) which contains kelp weights per square yard for each density class. The values from the table are below. Also of note is that there is another class recorded in Cameron (2015) without any density information, named "Reported," but this class makes up only 5/245 (2%) of kelp observations in the dataset. 
+Because the methods for each data source differ (multispectral imagery vs. vessel-based visual surveys), the CDFW and Cameron (1915) data are liked biased in different directions. The CDFW data is comprised of many small, high-resolution polygons, whereas the historical data is compromised of polygons with very large areas and no holes. Therefore, the historical data likely overestimates the actual kelp canopy area since it is likely that density is heterogeneous within each polygon. We can adjust the area of the historical polygons based on Table XXI from Cameron (2015) which contains kelp weights per square yard for each density class. The values from the table are below. Also of note is that there is another class recorded in Cameron (2015) without any density information, named "Reported." This class makes up 12.4% of kelp area (unscaled) in the dataset. 
 
 | Density class  | *Nereocystis* | *Macrocystis* | *Alaria fistulosa* |
 |----------------|-------------|-------------|------------------|
@@ -208,9 +209,8 @@ Because the methods for each data source differ (multispectral imagery vs. vesse
 | Heavy          | 225-280     | 55-64       | 11-13.6          |
 | Very Heavy     | 281         | 65          | 13.7             |
 
-
-For the purposes of this work, we will only consider *Nereocystis* and *Macrocystis*, since *A. fistulosa* is not distributed in California (is this right). For classes with ranges, we will use the average.
-```{r adjust-historical-area}
+For the purposes of this work, we will only consider *Nereocystis* and *Macrocystis*, since *A. fistulosa* is not distributed in California (is this right?). For classes with ranges, we will use the average. We'll also calculate a mixed species weight that is the average of *Nereocystis* and *Macrocystis*. Northern California will use the *Nereocystis* weights, Southern California will use the *Macrocystis* weights, and Central California will used the mixed species weights.
+```{r generate-weights}
 kelp_weights <- read_csv(here("raw", "cameron_1915_kelp_weights.csv"))
 
 kelp_weights <- kelp_weights %>% 
@@ -220,17 +220,37 @@ kelp_weights <- kelp_weights %>%
   # For the "reported" class, let's assume it is the average of the weights for each species
   add_row(Class = "Reported",
           nereo_rescaled = mean(.$nereo_rescaled),
-          macro_rescaled = mean(.$macro_rescaled)) %>% 
-  # We assume the kelp is a mix of these two spp, so take the average rescaled value
+          macro_rescaled = mean(.$macro_rescaled)) %>%
+    # add_row(Class = "Reported", # Courtney used 0.5 but I think that underestimates
+    #       nereo_rescaled = 0.5,
+    #       macro_rescaled = 0.5) %>% 
+  # Calculate a mixed species weight by taking the average
   rowwise() %>% 
   mutate(mean_kelp_weight = mean(c(nereo_rescaled, macro_rescaled))) %>% 
   rename(nereo_lbs_per_yd2 = Nereo,
-         macro_lbs_per_yd2 = Macro) %>% 
-  write_csv(here("processed", "kelp_weights_for_scaling.csv"))
+         macro_lbs_per_yd2 = Macro)
 
+# Build temporary key for the join....prob more efficient way to do this step of data wrangling
+tmp_key <- data.frame(Class = rep(unique(kelp_weights$Class), 3), Region = rep(unique(kelp_current_df$region_cod), 7)) %>% 
+  arrange(Class, Region)
 
+# Select spp weights based on region
+kelp_weights <- kelp_weights %>% 
+  left_join(tmp_key) %>% 
+  select(Class, nereo_rescaled, macro_rescaled, mean_kelp_weight, Region) %>% 
+  pivot_longer(cols = c("nereo_rescaled", "macro_rescaled", "mean_kelp_weight"), names_to = "spp", values_to = "rescaled_weight") %>% 
+  filter((Region == "CA1" & spp == "nereo_rescaled") | (Region == "CA2" & spp == "mean_kelp_weight") | (Region == "CA3" & spp == "macro_rescaled")) %>% 
+  arrange(Region, Class)
+
+write_csv(kelp_weights, here("processed", "kelp_weights_for_scaling.csv"))
 ```
 
+Adjust the areas by the weights:
+```{r apply-weights}
+kelp_historical_df <- kelp_historical_df %>% 
+  left_join(select(kelp_weights, Class, Region, rescaled_weight), by = c("Kelp" = "Class", "region_cod" = "Region")) %>% 
+  mutate(area_adj = Shape_Area * rescaled_weight)
+```
 
 Next I'll filter the CDFW survey data to only the kelp marked as "canopy" (vs. "subsurface"), and calculate total canopy area per year per region for all surveys. Any surveys without a classification are assumed to be of the kelp canopy. Additionally, I'll denote which CDFW survey years were complete surveys, based on the bar graph on their website (linked above).
 ```{r calc-ts}
@@ -243,7 +263,7 @@ area_ts <- kelp_current_df %>%
   union( # Append the historical data
     kelp_historical_df %>% 
       group_by(region_cod) %>% 
-      summarize(total_area_m2 = sum(Shape_Area)) %>% 
+      summarize(total_area_m2 = sum(area_adj)) %>% 
       ungroup() %>% 
       mutate(year = 1911)
   ) %>% 
@@ -279,7 +299,8 @@ area_ts_wide %>%
          -CA1,
          -CA2,
          -CA3,
-         -total) %>% View
+         -total) %>% 
+  relocate(source, .after = last_col()) %>% View
 ```  
 
 Plot a quick time series.
@@ -305,21 +326,21 @@ ggsave(here("output", "fig_ca_kelp_time_series.png"), height = 6, width = 9, dpi
 What is the difference between the area of kelp coverage in 1911 and that of the most recent year(s) of data?
 ```{r calc-area-changes}
 # Delta
-(sum(kelp_historical_df$Shape_Area) -
+(sum(kelp_historical_df$area_adj) -
 sum(kelp_current_df$area[kelp_current_df$year == 2016])
 ) / 1e6 # sq. km
 
 # %
-(sum(kelp_historical_df$Shape_Area) -
+(sum(kelp_historical_df$area_adj) -
 sum(kelp_current_df$area[kelp_current_df$year == 2016])
-) / sum(kelp_historical_df$Shape_Area) * 100
+) / sum(kelp_historical_df$area_adj) * 100
 
 ```
 
 ## Plot changes between 1911 and 2016
 
 A few different plot options:
-```{r}
+```{r plot-results}
 region_pal <- "wesanderson::Darjeeling1"
 year_pal <- calecopal::cal_palette("sbchannel", n = 10, type = "continuous")
 labs <- c("CA1" = "Northern", "CA2" = "Central", "CA3" = "Southern", "total" = "Total")
@@ -334,8 +355,11 @@ area_ts %>%
        x = NULL) +
   scale_fill_manual(values = year_pal) +
   scale_x_discrete(labels = labs) +
+  scale_y_continuous(expand = c(0,0), breaks = seq(0,300, by = 50)) +
   ggpubr::theme_pubr() +
   theme(legend.position = "right")
+
+ggsave(here("output", "fig_area_per_year.png"), height = 6, width = 9, dpi = 300)
 
 # Dodged bar plot of area in 2016 vs. 1911 per region
 area_ts %>% 
@@ -347,8 +371,11 @@ area_ts %>%
        x = NULL) +
   scale_fill_manual(values = c("1911" = "black", "2016" = "gray40")) +
   scale_x_discrete(labels = labs) +
+  scale_y_continuous(expand = c(0,0), breaks = seq(0,300, by = 50)) +
   ggpubr::theme_pubr() +
   theme(legend.position = "right")
+
+ggsave(here("output", "fig_area_1911_vs_2016.png"), height = 6, width = 9, dpi = 300)
 
 # % change from 1911 levels per year
 area_ts %>% 
@@ -368,6 +395,8 @@ area_ts %>%
        color = NULL) +
   ggpubr::theme_pubr() +
   theme(legend.position = "right")
+
+ggsave(here("output", "fig_pct_area_lost_per_yr.png"), height = 6, width = 9, dpi = 300)
 ```
 
 
